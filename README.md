@@ -59,39 +59,105 @@ Query parameters accepted by `/api/insights` and `/api/events`:
 `q`, `severity`, `event_type`, `source`, `user`, `alert_type`, `src_ip`,
 `dst_ip`, `geo_location`, `anomaly`, `from`, `to`.
 
-## Deploy on PythonAnywhere
+## Deploy on PythonAnywhere (step-by-step)
 
-Yes, the app can run on PythonAnywhere. Steps:
+These instructions assume you already cloned the repository, e.g. in
+`/home/yourusername/SIEM_Simulator`. Replace `yourusername` and the folder name
+with your actual PythonAnywhere values.
 
-1. **Upload the project** via `git clone` or the PythonAnywhere Files tab.
-2. **Create and activate a virtual environment** in a Bash console:
-   ```bash
-   cd ~/SIEM_simulator
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. **Cache the Hugging Face dataset locally.** Free PythonAnywhere accounts have
-   strict outgoing-request rules, so download the dataset first on your local
-   machine or on PythonAnywhere with a paid account. Then upload the cache
-   folder to `~/.cache/huggingface/datasets/` on PythonAnywhere.
-   On your local machine run once:
+### 1. Open a Bash console on PythonAnywhere
+
+Go to **Consoles → Bash**.
+
+### 2. Move into the project folder and create the virtual environment
+
+```bash
+cd ~/SIEM_Simulator
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Cache the Hugging Face dataset
+
+**Important for free accounts:** PythonAnywhere free tier restricts outgoing
+requests. `load_dataset(...)` will fail if it has to download from Hugging Face.
+You have two options.
+
+**Option A – try downloading directly on PythonAnywhere** (often works on paid
+accounts, sometimes on free ones):
+
+```bash
+source venv/bin/activate
+python -c "from datasets import load_dataset; load_dataset('darkknight25/Advanced_SIEM_Dataset')"
+```
+
+If the command above succeeds, you are done with this step.
+
+**Option B – upload the cache from your local machine** (recommended for free
+accounts):
+
+1. On your local machine, download the dataset once:
    ```bash
    python -c "from datasets import load_dataset; load_dataset('darkknight25/Advanced_SIEM_Dataset')"
    ```
-   and upload the generated `~/.cache/huggingface/datasets/` directory.
-4. **Edit `wsgi.py`** and replace `/home/yourusername/SIEM_simulator` with your
-   actual PythonAnywhere project path.
-5. **Configure the Web app** in the PythonAnywhere Web tab:
-   - Source code directory: `/home/yourusername/SIEM_simulator`
-   - Working directory: `/home/yourusername/SIEM_simulator`
-   - WSGI configuration file: point it to `/home/yourusername/SIEM_simulator/wsgi.py`
-   - Virtualenv path: `/home/yourusername/SIEM_simulator/venv`
-6. **Static files mapping** (optional but recommended for performance):
-   - URL: `/static/`
-   - Directory: `/home/yourusername/SIEM_simulator/static`
-7. **Reload** the web app and visit your PythonAnywhere domain.
+2. Find your Hugging Face cache directory:
+   - Linux/macOS: `~/.cache/huggingface/datasets/`
+   - Windows: `%USERPROFILE%\.cache\huggingface\datasets\`
+3. Upload the entire `datasets` folder to PythonAnywhere under
+   `/home/yourusername/.cache/huggingface/datasets/` (use the Files tab or
+   `scp`/`rsync`).
 
-> Note: the dataset is kept in memory. The PythonAnywhere free tier memory
-> limit is enough for 100k rows, but avoid loading multiple copies.
+### 4. Configure `wsgi.py`
+
+Edit `/home/yourusername/SIEM_Simulator/wsgi.py` on PythonAnywhere and replace:
+
+```python
+PROJECT_PATH = '/home/yourusername/SIEM_Simulator'
+```
+
+with your real path, for example:
+
+```python
+PROJECT_PATH = '/home/gobbez/SIEM_Simulator'
+```
+
+### 5. Create / reconfigure the Web app
+
+1. Go to the **Web** tab on PythonAnywhere.
+2. Click **Add a new web app** (or open your existing app).
+3. Choose **Manual configuration** and select **Python 3.10** (or newer).
+4. Fill in the form:
+   - **Source code directory:** `/home/yourusername/SIEM_Simulator`
+   - **Working directory:** `/home/yourusername/SIEM_Simulator`
+   - **WSGI configuration file:** click the link and paste the contents of
+     `/home/yourusername/SIEM_Simulator/wsgi.py`, or point it to that file.
+   - **Virtualenv path:** `/home/yourusername/SIEM_Simulator/venv`
+
+### 6. Add the static files mapping
+
+Still in the **Web** tab, under **Static files**, add:
+
+- **URL:** `/static/`
+- **Directory:** `/home/yourusername/SIEM_Simulator/static`
+
+This lets PythonAnywhere serve CSS/JS directly instead of going through Flask.
+
+### 7. Reload and test
+
+Click the **Reload** button for your web app and visit your PythonAnywhere
+domain (e.g. `https://yourusername.pythonanywhere.com`).
+
+You should see the dashboard. The first request may take 10–30 seconds while the
+dataset is loaded into memory.
+
+### Troubleshooting
+
+- **500 Internal Server Error:** open the **Error log** in the Web tab; the most
+  common cause is a missing dataset cache or a wrong path in `wsgi.py`.
+- **Dataset not found / timeout:** the Hugging Face cache is missing or in the
+  wrong location. Re-run step 3.
+- **Static files missing (no CSS/JS):** double-check step 6 and reload the app.
+- **Memory errors:** the free tier handles 100k rows, but if you run multiple
+  reloads in a row, wait a moment for the old worker to be killed.
 
