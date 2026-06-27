@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Flask / Python
+instance/
+.webassets-cache
+*.log
+
+# Hugging Face dataset cache (do NOT commit the dataset)
+.cache/
+.huggingface/
+datasets/
+*.arrow
+*.parquet
+*.jsonl
+*.csv
+
+# PythonAnywhere
+*.pid

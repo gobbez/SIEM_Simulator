@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIEM Insights Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <header class="top-bar">
+        <div class="brand">
+            <span class="logo">◈</span>
+            <h1>SIEM Insights</h1>
+            <span class="subtitle">Advanced SIEM Dataset</span>
+        </div>
+        <div class="actions">
+            <span id="health" class="badge">Loading…</span>
+            <button id="refreshBtn" class="btn primary">↻ Refresh</button>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Filters -->
+        <section class="panel filters">
+            <div class="filter-row">
+                <div class="field">
+                    <label>Search</label>
+                    <input type="text" id="q" placeholder="User, IP, object, log text…">
+                </div>
+                <div class="field">
+                    <label>Severity</label>
+                    <select id="severity" multiple></select>
+                </div>
+                <div class="field">
+                    <label>Event Type</label>
+                    <select id="event_type" multiple></select>
+                </div>
+                <div class="field">
+                    <label>Source</label>
+                    <select id="source" multiple></select>
+                </div>
+                <div class="field">
+                    <label>From</label>
+                    <input type="datetime-local" id="from">
+                </div>
+                <div class="field">
+                    <label>To</label>
+                    <input type="datetime-local" id="to">
+                </div>
+                <button id="applyFilters" class="btn primary">Apply</button>
+                <button id="resetFilters" class="btn ghost">Reset</button>
+            </div>
+        </section>
+
+        <!-- KPIs -->
+        <section class="kpi-grid">
+            <div class="kpi">
+                <span class="kpi-label">Total Events</span>
+                <span class="kpi-value" id="kpi-total">-</span>
+            </div>
+            <div class="kpi critical">
+                <span class="kpi-label">Critical</span>
+                <span class="kpi-value" id="kpi-critical">-</span>
+            </div>
+            <div class="kpi high">
+                <span class="kpi-label">High</span>
+                <span class="kpi-value" id="kpi-high">-</span>
+            </div>
+            <div class="kpi">
+                <span class="kpi-label">Anomalies</span>
+                <span class="kpi-value" id="kpi-anomalies">-</span>
+            </div>
+            <div class="kpi">
+                <span class="kpi-label">Unique Users</span>
+                <span class="kpi-value" id="kpi-users">-</span>
+            </div>
+            <div class="kpi">
+                <span class="kpi-label">Unique Src IPs</span>
+                <span class="kpi-value" id="kpi-srcips">-</span>
+            </div>
+            <div class="kpi">
+                <span class="kpi-label">Avg Risk Score</span>
+                <span class="kpi-value" id="kpi-risk">-</span>
+            </div>
+        </section>
+
+        <!-- Charts row 1 -->
+        <section class="chart-grid">
+            <div class="panel chart-panel">
+                <h3>Severity Distribution</h3>
+                <canvas id="severityChart"></canvas>
+            </div>
+            <div class="panel chart-panel">
+                <h3>Event Type Distribution</h3>
+                <canvas id="eventTypeChart"></canvas>
+            </div>
+            <div class="panel chart-panel wide">
+                <h3>Events Over Time</h3>
+                <canvas id="timelineChart"></canvas>
+            </div>
+        </section>
+
+        <!-- Charts row 2 -->
+        <section class="chart-grid">
+            <div class="panel chart-panel">
+                <h3>Top Sources</h3>
+                <canvas id="sourceChart"></canvas>
+            </div>
+            <div class="panel chart-panel">
+                <h3>Top Users</h3>
+                <canvas id="userChart"></canvas>
+            </div>
+            <div class="panel chart-panel">
+                <h3>Top Actions</h3>
+                <canvas id="actionChart"></canvas>
+            </div>
+            <div class="panel chart-panel">
+                <h3>Top Geo Locations</h3>
+                <canvas id="geoChart"></canvas>
+            </div>
+            <div class="panel chart-panel">
+                <h3>Risk Score Distribution</h3>
+                <canvas id="riskChart"></canvas>
+            </div>
+            <div class="panel chart-panel wide">
+                <h3>Anomaly Timeline (last 24h)</h3>
+                <canvas id="anomalyChart"></canvas>
+            </div>
+        </section>
+
+        <!-- Events table -->
+        <section class="panel table-panel">
+            <div class="table-header">
+                <h3>Recent Events</h3>
+                <div class="pagination">
+                    <button id="prevPage" class="btn ghost">← Prev</button>
+                    <span id="pageInfo">Page 1</span>
+                    <button id="nextPage" class="btn ghost">Next →</button>
+                </div>
+            </div>
+            <div class="table-wrap">
+                <table id="eventsTable">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Severity</th>
+                            <th>Type</th>
+                            <th>Source</th>
+                            <th>User</th>
+                            <th>Action</th>
+                            <th>Object</th>
+                            <th>IP</th>
+                            <th>Risk</th>
+                            <th>Anomaly</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <!-- Event detail modal -->
+    <div id="modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Event Detail</h2>
+                <button id="closeModal" class="btn ghost">✕</button>
+            </div>
+            <div id="modalBody" class="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
