@@ -1,17 +1,21 @@
 """
 SIEM-like dashboard backend for the darkknight25/Advanced_SIEM_Dataset.
-Loads the Hugging Face dataset into memory and exposes REST endpoints used
-by a simple HTML/CSS/JS frontend.
+Loads the dataset (from a local Parquet file when available, otherwise from
+Hugging Face) into memory and exposes REST endpoints used by a simple
+HTML/CSS/JS frontend.
 """
 
 import os
-import re
 from datetime import datetime, timedelta
-from functools import lru_cache
 
 import pandas as pd
-from datasets import load_dataset
 from flask import Flask, jsonify, request, send_from_directory
+
+# datasets is only needed as a fallback when the Parquet file is missing.
+try:
+    from datasets import load_dataset
+except ImportError:  # pragma: no cover
+    load_dataset = None
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -20,37 +24,35 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # ---------------------------------------------------------------------------
 
 DATASET_NAME = "darkknight25/Advanced_SIEM_Dataset"
+PARQUET_FILE = "dataset.parquet"
 _df = None
 
 
-def load_data():
-    """Load the dataset from Hugging Face and normalise it into a DataFrame."""
-    global _df
-    if _df is not None:
-        return _df
+def _extract_nested(df):
+    """Flatten advanced_metadata and behavioral_analytics if still present."""
+    if "advanced_metadata" in df.columns:
+        meta = df["advanced_metadata"].apply(lambda x: x or {})
+        df["geo_location"] = meta.apply(lambda x: x.get("geo_location"))
+        df["risk_score"] = meta.apply(lambda x: x.get("risk_score"))
+        df["confidence"] = meta.apply(lambda x: x.get("confidence"))
+        df["session_id"] = meta.apply(lambda x: x.get("session_id"))
+        df["device_hash"] = meta.apply(lambda x: x.get("device_hash"))
+        df["user_agent"] = meta.apply(lambda x: x.get("user_agent"))
 
-    print(f"[{datetime.now()}] Loading dataset {DATASET_NAME}...")
-    ds = load_dataset(DATASET_NAME)
-    train = ds["train"]
+    if "behavioral_analytics" in df.columns:
+        behavior = df["behavioral_analytics"].apply(lambda x: x or {})
+        df["baseline_deviation"] = behavior.apply(lambda x: x.get("baseline_deviation"))
+        df["entropy"] = behavior.apply(lambda x: x.get("entropy"))
+        df["frequency_anomaly"] = behavior.apply(lambda x: x.get("frequency_anomaly", False))
+        df["sequence_anomaly"] = behavior.apply(lambda x: x.get("sequence_anomaly", False))
 
-    # Convert to pandas. 100k rows is small enough to keep in memory.
-    df = train.to_pandas()
+    return df
 
+
+def _normalize(df):
+    """Clean types and add derived columns."""
     # Normalise timestamp
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-
-    # Extract nested fields for easier filtering/aggregation
-    meta = df["advanced_metadata"].apply(lambda x: x or {})
-    df["geo_location"] = meta.apply(lambda x: x.get("geo_location"))
-    df["risk_score"] = meta.apply(lambda x: x.get("risk_score"))
-    df["confidence"] = meta.apply(lambda x: x.get("confidence"))
-    df["session_id"] = meta.apply(lambda x: x.get("session_id"))
-
-    behavior = df["behavioral_analytics"].apply(lambda x: x or {})
-    df["baseline_deviation"] = behavior.apply(lambda x: x.get("baseline_deviation"))
-    df["entropy"] = behavior.apply(lambda x: x.get("entropy"))
-    df["frequency_anomaly"] = behavior.apply(lambda x: x.get("frequency_anomaly", False))
-    df["sequence_anomaly"] = behavior.apply(lambda x: x.get("sequence_anomaly", False))
 
     # Ensure string columns are strings (or empty string when null)
     text_cols = [
@@ -59,7 +61,7 @@ def load_data():
         "device_type", "device_id", "firmware_version", "src_ip", "dst_ip",
         "alert_type", "signature_id", "category", "cloud_service", "resource_id",
         "model_id", "input_hash", "output_hash", "protocol", "method", "mac_address",
-        "geo_location", "session_id",
+        "geo_location", "session_id", "device_hash", "user_agent",
     ]
     for col in text_cols:
         if col in df.columns:
@@ -77,6 +79,36 @@ def load_data():
 
     # Sort by time descending for the event table
     df = df.sort_values("timestamp", ascending=False).reset_index(drop=True)
+    return df
+
+
+def load_data():
+    """Load the dataset from Parquet or Hugging Face into a DataFrame."""
+    global _df
+    if _df is not None:
+        return _df
+
+    # Prefer the local Parquet file (ideal for PythonAnywhere deployments).
+    parquet_path = os.path.join(os.path.dirname(__file__), PARQUET_FILE)
+    if os.path.exists(parquet_path):
+        print(f"[{datetime.now()}] Loading dataset from {PARQUET_FILE}...")
+        df = pd.read_parquet(parquet_path)
+        df = _normalize(df)
+        _df = df
+        print(f"[{datetime.now()}] Dataset ready: {len(df):,} rows")
+        return _df
+
+    # Fallback to Hugging Face (requires `datasets` and internet access).
+    if load_dataset is None:
+        raise RuntimeError(
+            "dataset.parquet not found and the 'datasets' library is not installed."
+        )
+
+    print(f"[{datetime.now()}] Loading dataset {DATASET_NAME} from Hugging Face...")
+    ds = load_dataset(DATASET_NAME)
+    df = ds["train"].to_pandas()
+    df = _extract_nested(df)
+    df = _normalize(df)
 
     _df = df
     print(f"[{datetime.now()}] Dataset ready: {len(df):,} rows")

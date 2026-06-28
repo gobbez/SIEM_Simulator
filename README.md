@@ -10,6 +10,7 @@ dataset from Hugging Face and exposes insights, KPIs and a filterable event list
 ```
 .
 ├── app.py                 # Flask backend
+├── convert_dataset.py     # Generate dataset.parquet from Hugging Face
 ├── requirements.txt       # Python dependencies
 ├── static/
 │   ├── index.html         # Dashboard UI
@@ -27,6 +28,22 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+## Dataset
+
+The app prefers a local `dataset.parquet` file (small, fast, no internet needed
+at runtime). Generate it once on a machine with internet access:
+
+```bash
+source venv/bin/activate
+python convert_dataset.py
+```
+
+This creates `dataset.parquet` (≈ 35–40 MB for 100k rows). Place it next to
+`app.py` before starting the server.
+
+If `dataset.parquet` is missing, the app falls back to downloading the dataset
+from Hugging Face, which requires the `datasets` library and internet access.
+
 ## Run
 
 ```bash
@@ -35,8 +52,7 @@ python app.py
 
 Open `http://localhost:5000` in your browser.
 
-The first start downloads the dataset from Hugging Face (≈ a few seconds); the
-data is then held in memory and all filters/charts are served from there.
+The dataset is held in memory; all filters and charts are served from there.
 
 ## Features
 
@@ -61,52 +77,47 @@ Query parameters accepted by `/api/insights` and `/api/events`:
 
 ## Deploy on PythonAnywhere (step-by-step)
 
-These instructions assume you already cloned the repository, e.g. in
+This is the recommended approach for PythonAnywhere free accounts because it
+avoids downloading the dataset on the server and uses a much smaller virtual
+environment.
+
+These instructions assume the project is cloned in
 `/home/yourusername/SIEM_Simulator`. Replace `yourusername` and the folder name
-with your actual PythonAnywhere values.
+with your actual values.
 
-### 1. Open a Bash console on PythonAnywhere
+### 1. On your local machine: generate `dataset.parquet`
 
-Go to **Consoles → Bash**.
+You need internet access and a bit of free disk space. In the project folder:
 
-### 2. Move into the project folder and create the virtual environment
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install datasets pandas pyarrow
+python convert_dataset.py
+```
+
+This produces `dataset.parquet` (≈ 35–40 MB).
+
+### 2. Upload the project and the Parquet file to PythonAnywhere
+
+Upload the whole project folder, **including `dataset.parquet`**, to
+`/home/yourusername/SIEM_Simulator` using the Files tab, `scp`, `rsync` or a
+similar tool.
+
+> Do **not** upload the `venv/` folder.
+
+### 3. Open a Bash console and create a small virtual environment
 
 ```bash
 cd ~/SIEM_Simulator
+rm -rf venv                 # remove any previous venv to free space
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install --no-cache-dir -r requirements.txt
 ```
 
-### 3. Cache the Hugging Face dataset
-
-**Important for free accounts:** PythonAnywhere free tier restricts outgoing
-requests. `load_dataset(...)` will fail if it has to download from Hugging Face.
-You have two options.
-
-**Option A – try downloading directly on PythonAnywhere** (often works on paid
-accounts, sometimes on free ones):
-
-```bash
-source venv/bin/activate
-python -c "from datasets import load_dataset; load_dataset('darkknight25/Advanced_SIEM_Dataset')"
-```
-
-If the command above succeeds, you are done with this step.
-
-**Option B – upload the cache from your local machine** (recommended for free
-accounts):
-
-1. On your local machine, download the dataset once:
-   ```bash
-   python -c "from datasets import load_dataset; load_dataset('darkknight25/Advanced_SIEM_Dataset')"
-   ```
-2. Find your Hugging Face cache directory:
-   - Linux/macOS: `~/.cache/huggingface/datasets/`
-   - Windows: `%USERPROFILE%\.cache\huggingface\datasets\`
-3. Upload the entire `datasets` folder to PythonAnywhere under
-   `/home/yourusername/.cache/huggingface/datasets/` (use the Files tab or
-   `scp`/`rsync`).
+The new `requirements.txt` no longer includes `datasets`, so the venv will be
+significantly smaller (≈ 200–250 MB instead of 330+ MB).
 
 ### 4. Configure `wsgi.py`
 
@@ -128,7 +139,7 @@ PROJECT_PATH = '/home/gobbez/SIEM_Simulator'
 2. Click **Add a new web app** (or open your existing app).
 3. Choose **Manual configuration** and select **Python 3.10** (or newer).
 4. Fill in the form:
-   - **Source code directory:** `/home/yourusername/SIEM_Simulator`
+   - **Source code:** `/home/yourusername/SIEM_Simulator`
    - **Working directory:** `/home/yourusername/SIEM_Simulator`
    - **WSGI configuration file:** click the link and paste the contents of
      `/home/yourusername/SIEM_Simulator/wsgi.py`, or point it to that file.
@@ -145,19 +156,22 @@ This lets PythonAnywhere serve CSS/JS directly instead of going through Flask.
 
 ### 7. Reload and test
 
-Click the **Reload** button for your web app and visit your PythonAnywhere
-domain (e.g. `https://yourusername.pythonanywhere.com`).
+Click the **Reload** button and visit your PythonAnywhere domain, e.g.
+`https://yourusername.pythonanywhere.com`.
 
-You should see the dashboard. The first request may take 10–30 seconds while the
-dataset is loaded into memory.
+The first request may take 10–30 seconds while the Parquet file is loaded into
+memory.
 
 ### Troubleshooting
 
-- **500 Internal Server Error:** open the **Error log** in the Web tab; the most
-  common cause is a missing dataset cache or a wrong path in `wsgi.py`.
-- **Dataset not found / timeout:** the Hugging Face cache is missing or in the
-  wrong location. Re-run step 3.
+- **500 Internal Server Error:** open the **Error log** in the Web tab. The most
+  common causes are a missing `dataset.parquet` file or a wrong path in
+  `wsgi.py`.
+- **Disk quota exceeded during `pip install`:** remove old virtual environments
+  (`rm -rf ~/SIEM_Simulator/venv`) and reinstall with
+  `pip install --no-cache-dir -r requirements.txt`.
+- **Dataset not found:** ensure `dataset.parquet` is in the project root next to
+  `app.py`.
 - **Static files missing (no CSS/JS):** double-check step 6 and reload the app.
-- **Memory errors:** the free tier handles 100k rows, but if you run multiple
-  reloads in a row, wait a moment for the old worker to be killed.
-
+- **Memory errors:** the free tier handles 100k rows, but if you reload many
+  times in a row, wait a moment for the old worker to be killed.
