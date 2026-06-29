@@ -137,6 +137,20 @@ def normalize(table):
         seq = new_cols["sequence_anomaly"].cast(pa.bool_())
         new_cols["anomaly"] = pc.or_(freq, seq).cast(pa.int32())
 
+    # Ground-truth label for the triage game.
+    # Severity critical/high -> True Positive
+    # Severity low/informational -> False Positive
+    # Everything else (medium) -> No Action
+    if "severity" in new_cols:
+        sev = new_cols["severity"]
+        is_tp = pc.is_in(sev, value_set=pa.array(["critical", "high"]))
+        is_fp = pc.is_in(sev, value_set=pa.array(["low", "informational"]))
+        new_cols["true_label"] = pc.if_else(
+            is_tp,
+            pa.scalar("True Positive"),
+            pc.if_else(is_fp, pa.scalar("False Positive"), pa.scalar("No Action")),
+        )
+
     return pa.table(new_cols)
 
 
@@ -159,17 +173,21 @@ def table_to_sqlite(table, db_path):
             col_defs.append(f'"{field.name}" INTEGER')
         else:
             col_defs.append(f'"{field.name}" TEXT')
+    # Extra column to store the user's triage decision
+    col_defs.append('"user_label" TEXT')
     conn.execute(f"CREATE TABLE logs ({', '.join(col_defs)})")
 
     col_names = table.schema.names
-    quoted = [f'"{c}"' for c in col_names]
-    placeholders = ",".join("?" * len(col_names))
+    quoted = [f'"{c}"' for c in col_names] + ['"user_label"']
+    placeholders = ",".join("?" * (len(col_names) + 1))
     insert_sql = f"INSERT INTO logs ({','.join(quoted)}) VALUES ({placeholders})"
 
     total = len(table)
     inserted = 0
     for batch in table.to_batches(max_chunksize=5_000):
         columns = [batch.column(c).to_pylist() for c in col_names]
+        # Add empty user_label for every row
+        columns.append([None] * len(batch))
         rows = list(zip(*columns))
         conn.executemany(insert_sql, rows)
         inserted += len(rows)

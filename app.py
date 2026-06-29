@@ -363,6 +363,42 @@ def events():
     })
 
 
+VALID_LABELS = {"False Positive", "True Positive", "No Action"}
+
+
+@app.route("/api/events/<event_id>/classify", methods=["POST"])
+def classify_event(event_id):
+    """Store the user's triage decision and report whether it matches the ground truth."""
+    data = request.get_json(silent=True) or {}
+    label = data.get("label")
+    if label not in VALID_LABELS:
+        return jsonify({
+            "error": f"Invalid label. Use one of: {', '.join(sorted(VALID_LABELS))}"
+        }), 400
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT true_label, user_label FROM logs WHERE event_id = ?", [event_id]
+        ).fetchone()
+        if row is None:
+            return jsonify({"error": "Event not found"}), 404
+
+        correct = (label == row["true_label"])
+        conn.execute(
+            "UPDATE logs SET user_label = ? WHERE event_id = ?",
+            [label, event_id]
+        )
+        conn.commit()
+
+    return jsonify({
+        "event_id": event_id,
+        "label": label,
+        "true_label": row["true_label"],
+        "correct": correct,
+        "previous_label": row["user_label"],
+    })
+
+
 @app.route("/api/events/<event_id>")
 def event_detail(event_id):
     with get_db() as conn:

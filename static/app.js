@@ -5,6 +5,11 @@ const API = {
     insights: (params) => fetch('/api/insights?' + new URLSearchParams(params)).then(r => r.json()),
     events: (params) => fetch('/api/events?' + new URLSearchParams(params)).then(r => r.json()),
     event: (id) => fetch(`/api/events/${id}`).then(r => r.json()),
+    classify: (id, label) => fetch(`/api/events/${id}/classify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+    }).then(r => r.json()),
 };
 
 // State
@@ -372,9 +377,59 @@ async function openEvent(id) {
                  <pre class="raw-log">${escapeHtml(ev.raw_log)}</pre>`;
     }
 
+    html += renderClassificationSection(ev);
+
     body.innerHTML = html;
     document.getElementById('modal').classList.remove('hidden');
 }
+
+function renderClassificationSection(ev) {
+    const already = ev.user_label || '';
+    const disabled = already ? 'disabled' : '';
+    return `
+        <div class="classification">
+            <h3>Triage this event</h3>
+            <div class="classification-buttons">
+                <button class="btn classification-btn fp ${disabled}" data-label="False Positive" data-id="${ev.event_id}" ${disabled}>False Positive</button>
+                <button class="btn classification-btn tp ${disabled}" data-label="True Positive" data-id="${ev.event_id}" ${disabled}>True Positive</button>
+                <button class="btn classification-btn na ${disabled}" data-label="No Action" data-id="${ev.event_id}" ${disabled}>No Action</button>
+            </div>
+            <div id="classification-result" class="classification-result">
+                ${already ? `You classified this event as <strong>${already}</strong>.` : 'Choose a label above.'}
+            </div>
+        </div>
+    `;
+}
+
+async function handleClassificationClick(e) {
+    const btn = e.target.closest('.classification-btn');
+    if (!btn || btn.disabled) return;
+
+    const id = btn.dataset.id;
+    const label = btn.dataset.label;
+    const resultEl = document.getElementById('classification-result');
+
+    resultEl.innerHTML = 'Checking...';
+    try {
+        const res = await API.classify(id, label);
+        if (res.error) {
+            resultEl.innerHTML = `<span class="error">${escapeHtml(res.error)}</span>`;
+            return;
+        }
+        const statusClass = res.correct ? 'correct' : 'wrong';
+        const statusText = res.correct ? '✓ Correct' : `✗ Wrong — the correct label was <strong>${escapeHtml(res.true_label)}</strong>`;
+        resultEl.innerHTML = `
+            <div class="classification-status ${statusClass}">${statusText}</div>
+            <div class="classification-summary">You chose: <strong>${escapeHtml(res.label)}</strong></div>
+        `;
+        document.querySelectorAll('.classification-btn').forEach(b => b.disabled = true);
+    } catch (err) {
+        resultEl.innerHTML = `<span class="error">Failed to submit: ${escapeHtml(err.message)}</span>`;
+    }
+}
+
+// Attach classification handler to modal body (event delegation)
+document.getElementById('modalBody').addEventListener('click', handleClassificationClick);
 
 function closeModal() {
     document.getElementById('modal').classList.add('hidden');
