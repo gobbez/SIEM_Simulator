@@ -20,6 +20,35 @@ def get_db():
     return conn
 
 
+def check_db():
+    """Validate that the SQLite dataset exists and has rows."""
+    if not os.path.exists(DB_FILE):
+        raise RuntimeError(
+            f"Dataset file not found: {DB_FILE}. "
+            "Run 'python convert_dataset.py' locally and upload dataset.db."
+        )
+    with get_db() as conn:
+        cur = conn.execute("SELECT COUNT(*) as cnt FROM logs")
+        if cur.fetchone()["cnt"] == 0:
+            raise RuntimeError("Dataset file exists but contains 0 rows.")
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    """Return JSON errors instead of Flask HTML debug pages."""
+    import traceback
+    app.logger.exception(e)
+    return jsonify({
+        "error": str(e),
+        "traceback": traceback.format_exc() if app.debug else None,
+    }), 500
+
+
+@app.before_request
+def ensure_db():
+    check_db()
+
+
 def _and(where, extra):
     """Append a condition to an existing WHERE clause."""
     return f"{where} AND {extra}" if where else f"WHERE {extra}"
