@@ -1,177 +1,189 @@
 # SIEM Insights Dashboard
 
-A simple SIEM-style dashboard (similar to Sumo Logic) built with a Python Flask
-backend and a vanilla HTML/CSS/JS frontend. It loads the
+A SIEM-style dashboard (similar to Sumo Logic) built with a Python Flask backend
+and a vanilla HTML/CSS/JS frontend. It loads the
 [`darkknight25/Advanced_SIEM_Dataset`](https://huggingface.co/datasets/darkknight25/Advanced_SIEM_Dataset)
-dataset from Hugging Face and exposes insights, KPIs and a filterable event list.
+dataset (100k security log events) and exposes insights, KPIs and a filterable
+event list.
 
 ## Structure
 
 ```
 .
-├── app.py                 # Flask backend
-├── convert_dataset.py     # Generate dataset.parquet from Hugging Face
-├── requirements.txt       # Python dependencies
+├── app.py                 # Flask backend (only dependency: Flask)
+├── convert_dataset.py     # One-time local script: generates dataset.db
+├── requirements.txt       # Runtime dependencies (Flask only)
 ├── static/
 │   ├── index.html         # Dashboard UI
 │   ├── style.css          # Dark SIEM theme
-│   └── app.js             # Frontend logic and Chart.js visualisations
+│   └── app.js             # Frontend logic and Chart.js charts
 ├── wsgi.py                # PythonAnywhere WSGI entry point
 └── README.md
 ```
 
-## Setup
+## How it works
+
+The backend reads from a local **SQLite** file (`dataset.db`). SQLite is part of
+the Python standard library — no extra packages are needed at runtime. This keeps
+the PythonAnywhere deployment well under the 500 MB free-tier disk limit.
+
+`convert_dataset.py` is a **local-only** utility that you run once on your own
+machine to produce `dataset.db`. You then upload that file to PythonAnywhere.
+
+## Local development
+
+### 1. Install runtime dependencies
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
 ```
 
-## Dataset
+`requirements.txt` contains only `flask`.
 
-The app prefers a local `dataset.parquet` file (small, fast, no internet needed
-at runtime). Generate it once on a machine with internet access:
+### 2. Generate the dataset (one-time)
+
+You need `pyarrow` locally for the conversion. If you already have
+`dataset.parquet` from a previous run:
 
 ```bash
-source venv/bin/activate
+pip install pyarrow
 python convert_dataset.py
 ```
 
-This creates `dataset.parquet` (≈ 35–40 MB for 100k rows). Place it next to
-`app.py` before starting the server.
+If you need to download the dataset fresh from Hugging Face:
 
-If `dataset.parquet` is missing, the app falls back to downloading the dataset
-from Hugging Face, which requires the `datasets` library and internet access.
+```bash
+pip install pyarrow requests
+python convert_dataset.py --download
+```
 
-## Run
+This produces `dataset.db` (~80–150 MB). The script also accepts an existing
+`dataset.parquet` and converts it without downloading again.
+
+### 3. Run
 
 ```bash
 python app.py
 ```
 
-Open `http://localhost:5000` in your browser.
-
-The dataset is held in memory; all filters and charts are served from there.
+Open `http://localhost:5000`.
 
 ## Features
 
 - KPI cards: total events, critical/high counts, anomalies, unique users,
-  unique source IPs and average risk score.
-- Interactive charts: severity, event type, sources, users, actions, geo
-  location, risk score distribution, events over time and anomaly timeline.
+  source IPs and average risk score.
+- Interactive charts: severity, event type, sources, top users, top actions,
+  geo location, risk score distribution, events over time, anomaly timeline.
 - Filterable event table with pagination and free-text search.
 - Event detail modal with full raw log and metadata.
 
 ## API endpoints
 
-- `GET /api/health` – dataset status and row count.
-- `GET /api/filters` – distinct values for filter dropdowns.
-- `GET /api/insights?...` – aggregated KPIs and chart data.
-- `GET /api/events?...` – paginated event list.
-- `GET /api/events/<event_id>` – single event details.
+| Endpoint | Description |
+|---|---|
+| `GET /api/health` | Dataset status and row count |
+| `GET /api/filters` | Distinct values for filter dropdowns |
+| `GET /api/insights?...` | Aggregated KPIs and chart data |
+| `GET /api/events?...` | Paginated event list |
+| `GET /api/events/<event_id>` | Single event detail |
 
 Query parameters accepted by `/api/insights` and `/api/events`:
 `q`, `severity`, `event_type`, `source`, `user`, `alert_type`, `src_ip`,
-`dst_ip`, `geo_location`, `anomaly`, `from`, `to`.
+`dst_ip`, `geo_location`, `anomaly`, `from`, `to`, `sort`, `order`,
+`page`, `per_page`.
 
-## Deploy on PythonAnywhere (step-by-step)
+## Deploy on PythonAnywhere (free tier)
 
-This is the recommended approach for PythonAnywhere free accounts because it
-avoids downloading the dataset on the server and uses a much smaller virtual
-environment.
+### Disk usage at a glance
 
-These instructions assume the project is cloned in
-`/home/yourusername/SIEM_Simulator`. Replace `yourusername` and the folder name
-with your actual values.
+| Component | Size |
+|---|---|
+| Flask + dependencies | ~15 MB |
+| `dataset.db` | ~80–150 MB |
+| Source files + static | ~1 MB |
+| **Total** | **~100–170 MB** (well under the 500 MB limit) |
 
-### 1. On your local machine: generate `dataset.parquet`
-
-You need internet access and a bit of free disk space. In the project folder:
+### Step 1 — Generate `dataset.db` locally
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install datasets pandas pyarrow
-python convert_dataset.py
+pip install pyarrow requests   # one-time, on your machine only
+python convert_dataset.py --download   # omit --download if you have dataset.parquet
 ```
 
-This produces `dataset.parquet` (≈ 35–40 MB).
+### Step 2 — Upload to PythonAnywhere
 
-### 2. Upload the project and the Parquet file to PythonAnywhere
+Upload the following files to `/home/yourusername/SIEM_Simulator/`:
 
-Upload the whole project folder, **including `dataset.parquet`**, to
-`/home/yourusername/SIEM_Simulator` using the Files tab, `scp`, `rsync` or a
-similar tool.
+```
+app.py
+wsgi.py
+requirements.txt
+dataset.db          ← the generated SQLite file
+static/
+```
 
-> Do **not** upload the `venv/` folder.
+> Do **not** upload `venv/`, `dataset.parquet`, or `convert_dataset.py`.
 
-### 3. Open a Bash console and create a small virtual environment
+Use the **Files** tab, `scp`, or `rsync`. For large files (dataset.db),
+`scp` is fastest:
+
+```bash
+scp dataset.db yourusername@ssh.pythonanywhere.com:~/SIEM_Simulator/
+```
+
+### Step 3 — Create the virtual environment on PythonAnywhere
+
+Open a **Bash console**:
 
 ```bash
 cd ~/SIEM_Simulator
-rm -rf venv                 # remove any previous venv to free space
 python3 -m venv venv
 source venv/bin/activate
 pip install --no-cache-dir -r requirements.txt
 ```
 
-The new `requirements.txt` no longer includes `datasets`, so the venv will be
-significantly smaller (≈ 200–250 MB instead of 330+ MB).
+This installs only Flask (~15 MB total).
 
-### 4. Configure `wsgi.py`
+### Step 4 — Configure `wsgi.py`
 
-Edit `/home/yourusername/SIEM_Simulator/wsgi.py` on PythonAnywhere and replace:
+Edit `wsgi.py` and set `PROJECT_PATH` to your actual path:
 
 ```python
 PROJECT_PATH = '/home/yourusername/SIEM_Simulator'
 ```
 
-with your real path, for example:
+### Step 5 — Create / configure the Web app
 
-```python
-PROJECT_PATH = '/home/gobbez/SIEM_Simulator'
-```
-
-### 5. Create / reconfigure the Web app
-
-1. Go to the **Web** tab on PythonAnywhere.
-2. Click **Add a new web app** (or open your existing app).
-3. Choose **Manual configuration** and select **Python 3.10** (or newer).
-4. Fill in the form:
+1. Go to the **Web** tab → **Add a new web app**.
+2. Choose **Manual configuration** → **Python 3.10** (or newer).
+3. Fill in:
    - **Source code:** `/home/yourusername/SIEM_Simulator`
    - **Working directory:** `/home/yourusername/SIEM_Simulator`
-   - **WSGI configuration file:** click the link and paste the contents of
-     `/home/yourusername/SIEM_Simulator/wsgi.py`, or point it to that file.
+   - **WSGI configuration file:** paste the contents of `wsgi.py`
    - **Virtualenv path:** `/home/yourusername/SIEM_Simulator/venv`
 
-### 6. Add the static files mapping
+### Step 6 — Add the static files mapping
 
-Still in the **Web** tab, under **Static files**, add:
+In the **Web** tab → **Static files**:
 
-- **URL:** `/static/`
-- **Directory:** `/home/yourusername/SIEM_Simulator/static`
+| URL | Directory |
+|---|---|
+| `/static/` | `/home/yourusername/SIEM_Simulator/static` |
 
-This lets PythonAnywhere serve CSS/JS directly instead of going through Flask.
+### Step 7 — Reload and test
 
-### 7. Reload and test
+Click **Reload** and open `https://yourusername.pythonanywhere.com`.
 
-Click the **Reload** button and visit your PythonAnywhere domain, e.g.
-`https://yourusername.pythonanywhere.com`.
-
-The first request may take 10–30 seconds while the Parquet file is loaded into
-memory.
+The first request is instant — SQLite queries on 100k rows are fast.
 
 ### Troubleshooting
 
-- **500 Internal Server Error:** open the **Error log** in the Web tab. The most
-  common causes are a missing `dataset.parquet` file or a wrong path in
-  `wsgi.py`.
-- **Disk quota exceeded during `pip install`:** remove old virtual environments
-  (`rm -rf ~/SIEM_Simulator/venv`) and reinstall with
-  `pip install --no-cache-dir -r requirements.txt`.
-- **Dataset not found:** ensure `dataset.parquet` is in the project root next to
-  `app.py`.
-- **Static files missing (no CSS/JS):** double-check step 6 and reload the app.
-- **Memory errors:** the free tier handles 100k rows, but if you reload many
-  times in a row, wait a moment for the old worker to be killed.
+| Symptom | Fix |
+|---|---|
+| 500 error on first load | Check **Error log** in Web tab; most likely `dataset.db` is missing or `wsgi.py` has the wrong path. |
+| Disk quota exceeded during `pip install` | Run `rm -rf ~/SIEM_Simulator/venv` then reinstall. |
+| `dataset.db` not found | Confirm the file is in the project root next to `app.py`. |
+| No CSS/JS | Double-check the static files mapping in Step 6 and reload. |

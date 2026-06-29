@@ -1,187 +1,120 @@
 """
-SIEM-like dashboard backend for the darkknight25/Advanced_SIEM_Dataset.
-Loads the dataset (from a local Parquet file when available, otherwise from
-Hugging Face) into memory and exposes REST endpoints used by a simple
-HTML/CSS/JS frontend.
+SIEM-like dashboard backend.
+Dataset is a local SQLite file (dataset.db) — only Flask is required.
+Run convert_dataset.py locally to generate dataset.db, then upload it to PythonAnywhere.
 """
 
 import os
+import sqlite3
 from datetime import datetime, timedelta
 
-import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
-# datasets is only needed as a fallback when the Parquet file is missing.
-try:
-    from datasets import load_dataset
-except ImportError:  # pragma: no cover
-    load_dataset = None
-
 app = Flask(__name__, static_folder="static", static_url_path="")
-
-# ---------------------------------------------------------------------------
-# Dataset loading
-# ---------------------------------------------------------------------------
-
-DATASET_NAME = "darkknight25/Advanced_SIEM_Dataset"
-PARQUET_FILE = "dataset.parquet"
-_df = None
+DB_FILE = os.path.join(os.path.dirname(__file__), "dataset.db")
 
 
-def _extract_nested(df):
-    """Flatten advanced_metadata and behavioral_analytics if still present."""
-    if "advanced_metadata" in df.columns:
-        meta = df["advanced_metadata"].apply(lambda x: x or {})
-        df["geo_location"] = meta.apply(lambda x: x.get("geo_location"))
-        df["risk_score"] = meta.apply(lambda x: x.get("risk_score"))
-        df["confidence"] = meta.apply(lambda x: x.get("confidence"))
-        df["session_id"] = meta.apply(lambda x: x.get("session_id"))
-        df["device_hash"] = meta.apply(lambda x: x.get("device_hash"))
-        df["user_agent"] = meta.apply(lambda x: x.get("user_agent"))
-
-    if "behavioral_analytics" in df.columns:
-        behavior = df["behavioral_analytics"].apply(lambda x: x or {})
-        df["baseline_deviation"] = behavior.apply(lambda x: x.get("baseline_deviation"))
-        df["entropy"] = behavior.apply(lambda x: x.get("entropy"))
-        df["frequency_anomaly"] = behavior.apply(lambda x: x.get("frequency_anomaly", False))
-        df["sequence_anomaly"] = behavior.apply(lambda x: x.get("sequence_anomaly", False))
-
-    return df
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def _normalize(df):
-    """Clean types and add derived columns."""
-    # Normalise timestamp
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-
-    # Ensure string columns are strings (or empty string when null)
-    text_cols = [
-        "event_id", "event_type", "source", "severity", "raw_log", "user",
-        "action", "object", "parent_process", "additional_info", "description",
-        "device_type", "device_id", "firmware_version", "src_ip", "dst_ip",
-        "alert_type", "signature_id", "category", "cloud_service", "resource_id",
-        "model_id", "input_hash", "output_hash", "protocol", "method", "mac_address",
-        "geo_location", "session_id", "device_hash", "user_agent",
-    ]
-    for col in text_cols:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str).replace("nan", "")
-
-    # Numeric cleanup
-    for col in ["src_port", "dst_port", "bytes", "duration", "process_id"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Derived columns
-    df["anomaly"] = df["frequency_anomaly"] | df["sequence_anomaly"]
-    df["date"] = df["timestamp"].dt.floor("min")
-    df["hour"] = df["timestamp"].dt.floor("h")
-
-    # Sort by time descending for the event table
-    df = df.sort_values("timestamp", ascending=False).reset_index(drop=True)
-    return df
+def _and(where, extra):
+    """Append a condition to an existing WHERE clause."""
+    return f"{where} AND {extra}" if where else f"WHERE {extra}"
 
 
-def load_data():
-    """Load the dataset from Parquet or Hugging Face into a DataFrame."""
-    global _df
-    if _df is not None:
-        return _df
+def build_where(args):
+    """Return (WHERE clause string, params list) from request args."""
+    conditions, params = [], []
 
-    # Prefer the local Parquet file (ideal for PythonAnywhere deployments).
-    parquet_path = os.path.join(os.path.dirname(__file__), PARQUET_FILE)
-    if os.path.exists(parquet_path):
-        print(f"[{datetime.now()}] Loading dataset from {PARQUET_FILE}...")
-        df = pd.read_parquet(parquet_path)
-        df = _normalize(df)
-        _df = df
-        print(f"[{datetime.now()}] Dataset ready: {len(df):,} rows")
-        return _df
+    for field in ("severity", "event_type", "source", "user",
+                  "alert_type", "src_ip", "dst_ip", "geo_location"):
+        val = args.get(field, "")
+        if val:
+            items = val.split(",")
+            conditions.append(f"{field} IN ({','.join('?' * len(items))})")
+            params.extend(items)
 
-    # Fallback to Hugging Face (requires `datasets` and internet access).
-    if load_dataset is None:
-        raise RuntimeError(
-            "dataset.parquet not found and the 'datasets' library is not installed."
+    if args.get("anomaly"):
+        conditions.append("anomaly = ?")
+        params.append(1 if args["anomaly"].lower() == "true" else 0)
+
+    if args.get("from"):
+        conditions.append("timestamp >= ?")
+        params.append(args["from"])
+
+    if args.get("to"):
+        conditions.append("timestamp <= ?")
+        params.append(args["to"])
+
+    q = args.get("q", "").strip()
+    if q:
+        like = f"%{q}%"
+        conditions.append(
+            "(raw_log LIKE ? OR description LIKE ? OR user LIKE ?"
+            " OR object LIKE ? OR src_ip LIKE ? OR dst_ip LIKE ?)"
         )
+        params.extend([like] * 6)
 
-    print(f"[{datetime.now()}] Loading dataset {DATASET_NAME} from Hugging Face...")
-    ds = load_dataset(DATASET_NAME)
-    df = ds["train"].to_pandas()
-    df = _extract_nested(df)
-    df = _normalize(df)
-
-    _df = df
-    print(f"[{datetime.now()}] Dataset ready: {len(df):,} rows")
-    return _df
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    return where, params
 
 
-@app.before_request
-def ensure_data():
-    if _df is None:
-        load_data()
+def _bucket_expr(delta):
+    """Return a SQLite expression that truncates timestamp to the appropriate bucket."""
+    if delta is None or delta > timedelta(days=7):
+        return "strftime('%Y-%m-%dT00:00:00', timestamp)"
+    if delta > timedelta(days=1):
+        # 6-hour buckets
+        return (
+            "strftime('%Y-%m-%dT', timestamp) ||"
+            " CASE WHEN CAST(strftime('%H', timestamp) AS INTEGER) < 6 THEN '00'"
+            " WHEN CAST(strftime('%H', timestamp) AS INTEGER) < 12 THEN '06'"
+            " WHEN CAST(strftime('%H', timestamp) AS INTEGER) < 18 THEN '12'"
+            " ELSE '18' END || ':00:00'"
+        )
+    if delta > timedelta(hours=6):
+        return "strftime('%Y-%m-%dT%H:00:00', timestamp)"
+    # 10-minute buckets
+    return (
+        "strftime('%Y-%m-%dT%H:', timestamp) ||"
+        " CASE WHEN CAST(strftime('%M', timestamp) AS INTEGER) < 10 THEN '00'"
+        " WHEN CAST(strftime('%M', timestamp) AS INTEGER) < 20 THEN '10'"
+        " WHEN CAST(strftime('%M', timestamp) AS INTEGER) < 30 THEN '20'"
+        " WHEN CAST(strftime('%M', timestamp) AS INTEGER) < 40 THEN '30'"
+        " WHEN CAST(strftime('%M', timestamp) AS INTEGER) < 50 THEN '40'"
+        " ELSE '50' END || ':00'"
+    )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def top_n(conn, col, where, params, n=10):
+    """Return [{name, value}] for the top-n values of col, with an Other bucket."""
+    w = _and(where, f"{col} IS NOT NULL AND {col} != ''")
+    rows = conn.execute(
+        f"SELECT {col} as name, COUNT(*) as cnt FROM logs {w}"
+        f" GROUP BY {col} ORDER BY cnt DESC LIMIT ?",
+        params + [n + 1]
+    ).fetchall()
 
-def safe_top(series, n=10, other_label="Other"):
-    """Return a list of {name, value} for the top-n values of a series."""
-    counts = series[series.astype(bool)].value_counts()
-    if len(counts) <= n:
-        return [{"name": str(k), "value": int(v)} for k, v in counts.items()]
-    top = counts.head(n)
-    other = counts.iloc[n:].sum()
-    result = [{"name": str(k), "value": int(v)} for k, v in top.items()]
-    if other:
-        result.append({"name": other_label, "value": int(other)})
+    if len(rows) <= n:
+        return [{"name": r["name"], "value": r["cnt"]} for r in rows]
+
+    top_names = [r["name"] for r in rows[:n]]
+    placeholders = ",".join("?" * len(top_names))
+    other_row = conn.execute(
+        f"SELECT COUNT(*) as cnt FROM logs {w} AND {col} NOT IN ({placeholders})",
+        params + top_names
+    ).fetchone()
+    result = [{"name": r["name"], "value": r["cnt"]} for r in rows[:n]]
+    if other_row and other_row["cnt"]:
+        result.append({"name": "Other", "value": other_row["cnt"]})
     return result
 
 
-def apply_filters(df, args):
-    """Apply query-string filters to the DataFrame."""
-    if args.get("severity"):
-        df = df[df["severity"].isin(args.get("severity").split(","))]
-    if args.get("event_type"):
-        df = df[df["event_type"].isin(args.get("event_type").split(","))]
-    if args.get("source"):
-        df = df[df["source"].isin(args.get("source").split(","))]
-    if args.get("user"):
-        df = df[df["user"].isin(args.get("user").split(","))]
-    if args.get("alert_type"):
-        df = df[df["alert_type"].isin(args.get("alert_type").split(","))]
-    if args.get("src_ip"):
-        df = df[df["src_ip"].isin(args.get("src_ip").split(","))]
-    if args.get("dst_ip"):
-        df = df[df["dst_ip"].isin(args.get("dst_ip").split(","))]
-    if args.get("geo_location"):
-        df = df[df["geo_location"].isin(args.get("geo_location").split(","))]
-    if args.get("anomaly"):
-        df = df[df["anomaly"] == (args.get("anomaly").lower() == "true")]
-
-    # Time range: from / to in ISO-8601
-    if args.get("from"):
-        df = df[df["timestamp"] >= pd.to_datetime(args.get("from"))]
-    if args.get("to"):
-        df = df[df["timestamp"] <= pd.to_datetime(args.get("to"))]
-
-    # Free text search across common fields
-    q = args.get("q", "").strip().lower()
-    if q:
-        mask = (
-            df["raw_log"].str.lower().str.contains(q, na=False, regex=False)
-            | df["description"].str.lower().str.contains(q, na=False, regex=False)
-            | df["user"].str.lower().str.contains(q, na=False, regex=False)
-            | df["object"].str.lower().str.contains(q, na=False, regex=False)
-            | df["src_ip"].str.lower().str.contains(q, na=False, regex=False)
-            | df["dst_ip"].str.lower().str.contains(q, na=False, regex=False)
-        )
-        df = df[mask]
-    return df.copy()
-
-
 # ---------------------------------------------------------------------------
-# API routes
+# Routes
 # ---------------------------------------------------------------------------
 
 @app.route("/")
@@ -191,155 +124,206 @@ def index():
 
 @app.route("/api/health")
 def health():
-    df = load_data()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt, MIN(timestamp) as ts_min, MAX(timestamp) as ts_max FROM logs"
+        ).fetchone()
     return jsonify({
         "status": "ok",
-        "rows": len(df),
-        "time_range": {
-            "min": df["timestamp"].min().isoformat() if not df["timestamp"].isna().all() else None,
-            "max": df["timestamp"].max().isoformat() if not df["timestamp"].isna().all() else None,
-        }
+        "rows": row["cnt"],
+        "time_range": {"min": row["ts_min"], "max": row["ts_max"]},
     })
 
 
 @app.route("/api/filters")
 def filters():
-    """Return distinct values useful for the filter dropdowns."""
-    df = load_data()
-    return jsonify({
-        "severity": df["severity"][df["severity"].astype(bool)].unique().tolist(),
-        "event_type": df["event_type"][df["event_type"].astype(bool)].unique().tolist(),
-        "source": df["source"][df["source"].astype(bool)].unique().tolist(),
-        "user": df["user"][df["user"].astype(bool)].unique().tolist(),
-        "alert_type": df["alert_type"][df["alert_type"].astype(bool)].unique().tolist(),
-        "geo_location": sorted(df["geo_location"][df["geo_location"].astype(bool)].unique().tolist()),
-    })
+    with get_db() as conn:
+        def distinct(col):
+            rows = conn.execute(
+                f"SELECT DISTINCT {col} FROM logs"
+                f" WHERE {col} IS NOT NULL AND {col} != '' ORDER BY {col}"
+            ).fetchall()
+            return [r[0] for r in rows]
+
+        return jsonify({
+            "severity": distinct("severity"),
+            "event_type": distinct("event_type"),
+            "source": distinct("source"),
+            "user": distinct("user"),
+            "alert_type": distinct("alert_type"),
+            "geo_location": distinct("geo_location"),
+        })
 
 
 @app.route("/api/insights")
 def insights():
-    """Aggregate KPIs and distributions for the dashboard charts."""
-    df = apply_filters(load_data().copy(), request.args)
+    where, params = build_where(request.args)
 
-    # Time bucket selection based on time range
-    time_min = df["timestamp"].min()
-    time_max = df["timestamp"].max()
-    if pd.isna(time_min) or pd.isna(time_max):
-        bucket = "hour"
-    else:
-        delta = time_max - time_min
-        if delta <= timedelta(hours=6):
-            bucket = "10min"
-        elif delta <= timedelta(days=1):
-            bucket = "hour"
-        elif delta <= timedelta(days=7):
-            bucket = "6h"
-        else:
-            bucket = "D"
+    with get_db() as conn:
+        # Time range
+        row = conn.execute(
+            f"SELECT MIN(timestamp) as ts_min, MAX(timestamp) as ts_max FROM logs {where}",
+            params
+        ).fetchone()
+        ts_min, ts_max = row["ts_min"], row["ts_max"]
 
-    df["time_bucket"] = df["timestamp"].dt.floor(bucket)
-    timeline = (
-        df.groupby("time_bucket")
-        .size()
-        .reset_index(name="count")
-        .rename(columns={"time_bucket": "time"})
-    )
-    timeline["time"] = timeline["time"].dt.strftime("%Y-%m-%dT%H:%M:%S")
+        delta = None
+        if ts_min and ts_max:
+            try:
+                delta = datetime.fromisoformat(ts_max) - datetime.fromisoformat(ts_min)
+            except ValueError:
+                pass
 
-    # Severity distribution with critical/high emphasis
-    severity_order = ["critical", "high", "medium", "low", "informational"]
-    severity_counts = df["severity"].value_counts().to_dict()
-    severity = [{"name": s, "value": int(severity_counts.get(s, 0))} for s in severity_order]
+        # KPIs
+        kpi = conn.execute(f"""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) as critical,
+                SUM(CASE WHEN severity = 'high' THEN 1 ELSE 0 END) as high,
+                COUNT(DISTINCT CASE WHEN user != '' AND user IS NOT NULL THEN user END) as uniq_users,
+                COUNT(DISTINCT CASE WHEN src_ip != '' AND src_ip IS NOT NULL THEN src_ip END) as uniq_src,
+                COUNT(DISTINCT CASE WHEN dst_ip != '' AND dst_ip IS NOT NULL THEN dst_ip END) as uniq_dst,
+                SUM(anomaly) as anomalies,
+                AVG(risk_score) as avg_risk
+            FROM logs {where}
+        """, params).fetchone()
 
-    # Risk score distribution (10 bins)
-    rs = df["risk_score"].dropna()
-    if len(rs):
-        bins = pd.cut(rs, bins=10, include_lowest=True)
-        risk_hist = bins.value_counts().sort_index()
-        risk_distribution = [
-            {"name": f"{int(interval.left)}-{int(interval.right)}", "value": int(v)}
-            for interval, v in risk_hist.items()
-        ]
-    else:
+        # Severity distribution
+        severity_order = ["critical", "high", "medium", "low", "informational"]
+        sev_rows = conn.execute(
+            f"SELECT severity, COUNT(*) as cnt FROM logs {where} GROUP BY severity", params
+        ).fetchall()
+        sev_map = {r["severity"]: r["cnt"] for r in sev_rows}
+        severity = [{"name": s, "value": sev_map.get(s, 0)} for s in severity_order]
+
+        # Top-N distributions
+        event_type_dist = top_n(conn, "event_type", where, params)
+        source_dist = top_n(conn, "source", where, params)
+        top_users = top_n(conn, "user", where, params)
+        top_actions = top_n(conn, "action", where, params)
+        geo_location = top_n(conn, "geo_location", where, params, n=15)
+        alert_type = top_n(conn, "alert_type", where, params)
+
+        # Risk score distribution (10 equal-width bins)
         risk_distribution = []
+        rs_row = conn.execute(
+            f"SELECT MIN(risk_score) as mn, MAX(risk_score) as mx FROM logs {where}", params
+        ).fetchone()
+        if rs_row["mn"] is not None and rs_row["mx"] is not None:
+            mn, mx = rs_row["mn"], rs_row["mx"]
+            width = (mx - mn) / 10 if mx != mn else 1
+            cases = " ".join(
+                f"WHEN risk_score >= {mn + i * width} AND risk_score < {mn + (i + 1) * width}"
+                f" THEN '{int(mn + i * width)}-{int(mn + (i + 1) * width)}'"
+                for i in range(9)
+            )
+            last_bin = f"'{int(mn + 9 * width)}-{int(mx)}'"
+            w_rs = _and(where, "risk_score IS NOT NULL")
+            risk_rows = conn.execute(
+                f"SELECT CASE {cases} ELSE {last_bin} END as bin,"
+                f" COUNT(*) as cnt, MIN(risk_score) as min_rs"
+                f" FROM logs {w_rs} GROUP BY bin ORDER BY min_rs",
+                params
+            ).fetchall()
+            risk_distribution = [{"name": r["bin"], "value": r["cnt"]} for r in risk_rows]
 
-    # Recent anomaly timeline (last 24h by hour)
-    last_day = df[df["timestamp"] >= (time_max - timedelta(hours=24))] if not pd.isna(time_max) else df
-    anomaly_timeline = []
-    if not last_day.empty:
-        at = (
-            last_day.groupby([last_day["timestamp"].dt.floor("h"), "anomaly"])
-            .size()
-            .unstack(fill_value=0)
-            .reset_index()
-        )
-        at = at.rename(columns={"timestamp": "time"})
-        for _, row in at.iterrows():
-            anomaly_timeline.append({
-                "time": row["time"].strftime("%Y-%m-%dT%H:%M:%S"),
-                "normal": int(row.get(False, 0)),
-                "anomaly": int(row.get(True, 0)),
-            })
+        # Timeline
+        bucket_expr = _bucket_expr(delta)
+        timeline_rows = conn.execute(
+            f"SELECT {bucket_expr} as time, COUNT(*) as cnt"
+            f" FROM logs {where} GROUP BY time ORDER BY time",
+            params
+        ).fetchall()
+        timeline = [{"time": r["time"], "count": r["cnt"]} for r in timeline_rows]
+
+        # Anomaly timeline (last 24h by hour)
+        anomaly_timeline = []
+        if ts_max:
+            try:
+                dt_max = datetime.fromisoformat(ts_max)
+                cutoff = (dt_max - timedelta(hours=24)).isoformat()
+                w_at = _and(where, "timestamp >= ?")
+                at_rows = conn.execute(
+                    f"SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) as hour,"
+                    f" anomaly, COUNT(*) as cnt"
+                    f" FROM logs {w_at} GROUP BY hour, anomaly ORDER BY hour",
+                    params + [cutoff]
+                ).fetchall()
+                hourly = {}
+                for r in at_rows:
+                    h = r["hour"]
+                    if h not in hourly:
+                        hourly[h] = {"time": h, "normal": 0, "anomaly": 0}
+                    if r["anomaly"]:
+                        hourly[h]["anomaly"] += r["cnt"]
+                    else:
+                        hourly[h]["normal"] += r["cnt"]
+                anomaly_timeline = sorted(hourly.values(), key=lambda x: x["time"])
+            except ValueError:
+                pass
 
     return jsonify({
         "kpis": {
-            "total_events": int(len(df)),
-            "critical_events": int((df["severity"] == "critical").sum()),
-            "high_events": int((df["severity"] == "high").sum()),
-            "unique_users": int(df["user"][df["user"].astype(bool)].nunique()),
-            "unique_src_ips": int(df["src_ip"][df["src_ip"].astype(bool)].nunique()),
-            "unique_dst_ips": int(df["dst_ip"][df["dst_ip"].astype(bool)].nunique()),
-            "anomalies": int(df["anomaly"].sum()),
-            "avg_risk_score": round(df["risk_score"].mean(), 2) if not df["risk_score"].isna().all() else 0,
+            "total_events": kpi["total"],
+            "critical_events": kpi["critical"],
+            "high_events": kpi["high"],
+            "unique_users": kpi["uniq_users"],
+            "unique_src_ips": kpi["uniq_src"],
+            "unique_dst_ips": kpi["uniq_dst"],
+            "anomalies": kpi["anomalies"] or 0,
+            "avg_risk_score": round(kpi["avg_risk"], 2) if kpi["avg_risk"] is not None else 0,
         },
         "severity": severity,
-        "event_type": safe_top(df["event_type"]),
-        "source": safe_top(df["source"]),
-        "top_users": safe_top(df["user"]),
-        "top_actions": safe_top(df["action"]),
-        "geo_location": safe_top(df["geo_location"], n=15),
-        "alert_type": safe_top(df["alert_type"]),
+        "event_type": event_type_dist,
+        "source": source_dist,
+        "top_users": top_users,
+        "top_actions": top_actions,
+        "geo_location": geo_location,
+        "alert_type": alert_type,
         "risk_distribution": risk_distribution,
-        "timeline": timeline.to_dict(orient="records"),
+        "timeline": timeline,
         "anomaly_timeline": anomaly_timeline,
     })
 
 
 @app.route("/api/events")
 def events():
-    """Paginated, filterable event list."""
-    df = load_data().copy()
-    df = apply_filters(df, request.args)
+    where, params = build_where(request.args)
 
-    # Sorting
     sort = request.args.get("sort", "timestamp")
-    order = request.args.get("order", "desc")
-    if sort in df.columns:
-        df = df.sort_values(sort, ascending=(order == "asc"), na_position="last")
+    order = request.args.get("order", "desc").upper()
+    allowed_sort = {
+        "timestamp", "event_id", "event_type", "source", "severity",
+        "user", "action", "src_ip", "dst_ip", "risk_score", "anomaly",
+    }
+    if sort not in allowed_sort:
+        sort = "timestamp"
+    if order not in ("ASC", "DESC"):
+        order = "DESC"
 
-    # Pagination
     try:
         page = max(int(request.args.get("page", 1)), 1)
         per_page = min(max(int(request.args.get("per_page", 50)), 10), 500)
     except ValueError:
         page, per_page = 1, 50
 
-    total = len(df)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_df = df.iloc[start:end]
+    with get_db() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM logs {where}", params
+        ).fetchone()["cnt"]
 
-    # Convert to JSON-serialisable dicts
-    records = page_df.to_dict(orient="records")
-    for r in records:
-        # Replace NaT/NaN with None
-        for k, v in list(r.items()):
-            if pd.isna(v):
-                r[k] = None
-            elif isinstance(v, datetime):
-                r[k] = v.isoformat()
-        # Trim huge raw logs for the list view
+        offset = (page - 1) * per_page
+        rows = conn.execute(
+            f"SELECT * FROM logs {where}"
+            f" ORDER BY {sort} {order} LIMIT ? OFFSET ?",
+            params + [per_page, offset]
+        ).fetchall()
+
+    records = []
+    for row in rows:
+        r = dict(row)
         r["raw_log_preview"] = (r.get("raw_log") or "")[:240]
+        records.append(r)
 
     return jsonify({
         "total": total,
@@ -352,18 +336,13 @@ def events():
 
 @app.route("/api/events/<event_id>")
 def event_detail(event_id):
-    """Return a single event with all its fields."""
-    df = load_data()
-    row = df[df["event_id"] == event_id]
-    if row.empty:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM logs WHERE event_id = ?", [event_id]
+        ).fetchone()
+    if row is None:
         return jsonify({"error": "Event not found"}), 404
-    record = row.iloc[0].to_dict()
-    for k, v in list(record.items()):
-        if pd.isna(v):
-            record[k] = None
-        elif isinstance(v, datetime):
-            record[k] = v.isoformat()
-    return jsonify(record)
+    return jsonify(dict(row))
 
 
 # ---------------------------------------------------------------------------

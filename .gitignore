@@ -50,5 +50,8 @@ datasets/
 *.jsonl
 *.csv
 
+# Dataset files (large — upload manually, do not commit)
+*.db
+
 # PythonAnywhere
 *.pid
